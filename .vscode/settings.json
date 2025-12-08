@@ -2,7 +2,7 @@
     "editor.fontSize": 18,
     "python.formatting.provider": "black",
     "python.formatting.blackArgs": [
-        "--line-length=88"
+        "--line-length=120"
     ],
     "editor.formatOnSave": true
 }
