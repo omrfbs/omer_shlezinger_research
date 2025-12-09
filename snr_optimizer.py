@@ -45,7 +45,7 @@ class OptimizeSNR(nn.Module):
 
     def normalize(self, x: Tensor) -> Tensor:
         x /= torch.std(x, dim=(1, 2), keepdim=True)
-        
+
         return x
 
     def forward(self, x: Tensor):
@@ -72,7 +72,7 @@ def circular_weigthed_mean(x: Tensor) -> Tensor:
     # vals, idxs = diff.sort()
     # alpha = vals[0] / (vals[0] + vals[1])
     # peak_idx = alpha * idxs[1] + (1 - alpha) * idxs[0]
-    peak_idx = (avg.angle()+torch.pi)/(2*torch.pi)
+    peak_idx = (avg.angle() + torch.pi) / (2 * torch.pi)
     peak_idx = peak_idx * n
     mag = avg.abs() ** 2
     return mag, peak_idx
@@ -92,10 +92,10 @@ def snr(rd_map: Tensor) -> Tuple[Tensor, float]:
     max_range_index = max_global_index - max_doppler_index * rd_map_energy.shape[1]
     mag, peak_idx = circular_weigthed_mean(rd_map_energy[:, max_range_index])
     peak = rd_map_energy[torch.floor(peak_idx).to(torch.int), max_range_index]
-    global_noise = (rd_map_energy.sum() - peak.sum())/(rd_map_energy.numel()-1)
+    global_noise = (rd_map_energy.sum() - peak.sum()) / (rd_map_energy.numel() - 1)
     doppler_noise = rd_map_energy[:, max_range_index].sum() - peak.sum()
     avg_noise = doppler_noise
-    return -10*torch.log10(peak.sum()) + 10*torch.log10(avg_noise), peak_idx
+    return -10 * torch.log10(peak.sum()) + 10 * torch.log10(avg_noise), peak_idx
     # return -10 * torch.log10(mag), peak_idx
 
 
@@ -204,8 +204,10 @@ n_iter = 1000
 columns = [
     "Range",
     "Doppler",
-    "Doppler Opt",
-    "Doppler Classic",
+    "Doppler Opt Peak",
+    "Doppler Classic Peak",
+    "Doppler Opt Avg",
+    "Doppler Classic Avg",
     "SNR Opt",
     "SNR Classic",
 ]
@@ -271,7 +273,9 @@ for index, (iq, (range_index, doppler_index)) in tqdm(enumerate(dataset)):
     mag_opt, doppler_index_opt = circular_weigthed_mean(
         best_rd_map[:, max_range_index].to(device=device)
     )
-    df.loc[index, "Doppler Opt"] = max_doppler_index.cpu().item()
+    _, doppler_opt_avg = circular_weigthed_mean(best_rd_map[:, max_range_index])
+    df.loc[index, "Doppler Opt Peak"] = max_doppler_index.item()
+    df.loc[index, "Doppler Opt Avg"] = doppler_opt_avg.item()
     df.loc[index, "SNR Opt"] = snr_opt.cpu().item()
 
     after_mf = pulse_compression(
@@ -291,16 +295,18 @@ for index, (iq, (range_index, doppler_index)) in tqdm(enumerate(dataset)):
     mag_classic, doppler_index_classic = circular_weigthed_mean(
         rd_map_classic[:, max_range_index].to(device=device)
     )
-    df.loc[index, "Doppler Classic"] = doppler_index_classic.item()
-    df.loc[index, "SNR Classic"] = mag_classic.item()
+
+    df.loc[index, "Doppler Classic Peak"] = max_doppler_index.item()
+    df.loc[index, "Doppler Classic Avg"] = doppler_index_classic.item()
+    df.loc[index, "SNR Classic"] = snr_classic.item()
     # print(f'SNR={-loss:.2f}')
 # %% Statistics
 
-df_diff_classic = df["Doppler Classic"] - df["Doppler"]
+df_diff_classic = df["Doppler Classic Avg"] - df["Doppler"]
 df_diff_classic[df_diff_classic < -10] += 20
 df_diff_classic[df_diff_classic > 10] -= 20
 
-df_diff_opt = df["Doppler Opt"] - df["Doppler"]
+df_diff_opt = df["Doppler Opt Avg"] - df["Doppler"]
 df_diff_opt[df_diff_opt < -10] += 20
 df_diff_opt[df_diff_opt > 10] -= 20
 
