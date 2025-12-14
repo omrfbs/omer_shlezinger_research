@@ -91,6 +91,8 @@ class DeepUnfolding(nn.Module):
         x = F.conv1d(x, self.mf_coeffs, padding=self.padding, groups=self.seq_len)
 
         for i in range(self.n_steps + 1):
+            w_phase = w_phase.clone().detach().requires_grad_(True)
+            w_mag = w_mag.clone().detach().requires_grad_(True)
             # Force phase from -pi to pi
             phase = torch.atan(w_phase)
             w_phase_all[:, i] = phase
