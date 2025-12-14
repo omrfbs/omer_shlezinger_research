@@ -8,6 +8,7 @@ from radar_simulator.signal_processing.signal_processing import (
     pulse_compression,
     produce_rd_map,
 )
+from utils import circular_weigthed_mean
 from torch import optim
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -15,75 +16,137 @@ from copy import deepcopy
 import math
 from typing import Tuple
 from dataclasses import dataclass
-# %%
-def snr(rd_map: Tensor) -> Tuple[Tensor, float]:
-    nfft = rd_map.shape[0]
+from basic_nn import BasicNeuralNetwork, NeuralNetworkParams
+
+# %% Dataset
+train_dataset = IqDiscDataset(
+    n_samples=100,
+    r_min=0,
+    r_max=29000,
+    v_min=0,
+    v_max=90,
+    rotation_max=50,
+    radius=0.2,
+    target_type="point",
+    use_custom_rcs=True,
+)
+train_dataset.produce_iq()
+
+
+# %% Loss Function
+def snr(rd_map: Tensor) -> Tensor:
+    nfft = rd_map.shape[1]
     rd_map_energy = rd_map.abs() ** 2
-    max_global_index = rd_map_energy.argmax()
-    max_doppler_index = max_global_index // rd_map_energy.shape[1]
-    max_range_index = max_global_index - max_doppler_index * rd_map_energy.shape[1]
-    mag, _ = circular_weigthed_mean(rd_map_energy[:, max_range_index])
+    flattened = rd_map_energy.view(rd_map.shape[0], -1)  # shape (4, 5*6)
+    max_val, max_global_index = flattened.max(dim=1)
+    max_doppler_index = max_global_index // rd_map_energy.shape[2]
+    max_range_index = max_global_index - max_doppler_index * rd_map_energy.shape[2]
+    mag, peak_idx = circular_weigthed_mean(rd_map_energy[torch.arange(rd_map.shape[0], device=device), :, max_range_index])
     idx = torch.round(peak_idx).to(torch.int) % nfft
-    peak = rd_map_energy[idx, max_range_index]
-    global_noise = (rd_map_energy.sum() - peak) / (rd_map_energy.numel() - 1)
-    doppler_noise = rd_map_energy[:, max_range_index].sum() - peak
-    avg_noise = doppler_noise
-    return 10 * torch.log10(peak) - 10 * torch.log10(avg_noise)
+    peak = rd_map_energy[torch.arange(rd_map.shape[0], device=device), idx, max_range_index]
+    doppler_noise = (rd_map_energy[torch.arange(rd_map.shape[0], device=device), :, max_range_index].sum(dim=-1) - peak)/(nfft-1)
+    return (-10 * torch.log10(peak) + 10 * torch.log10(doppler_noise)).mean()
+
 
 # %%
 @dataclass
 class DataInSteps:
-    data: Tensor # original IQ
+    data: Tensor  # original IQ after Matched Filter
     w_mag: Tensor
     w_phase: Tensor
 
     def iq(self, step: int = -1) -> Tensor:
         return self.iq * w_mag[:, step] * torch.exp(-1j * w_phase[:, step])
-    
+
     def rd_map(self, step: int = -1) -> Tensor:
         _iq = self.iq(step)
-        return  torch.fft.fftshift(torch.fft.fft(_iq, dim=0), dim=0)
+        return torch.fft.fftshift(torch.fft.fft(_iq, dim=0), dim=0)
 
     def loss(step: int = -1) -> Tensor:
         _rd_map = rd_map_in_step(step=step)
         return snr(_rd_map)
 
+
+# %% Optimizer
 class DeepUnfolding(nn.Module):
 
-    def __init__(n_steps: int, self, seq_len: int, kernel: Tensor, *args, **kwargs):
+    def __init__(self, n_steps: int, seq_len: int, kernel: Tensor, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.seq_len = seq_len
         self.n_steps = n_steps
-        self.step_size = nn.Parameter((n_steps))
-        torch.nn.init.uniform_(self.step_size)
-        self.mf_coeffs = (kernel.repeat(self.seq_len, 1).unsqueeze(1).conj().to(device=device))
+        self.step_size_mag = nn.Parameter(0.01 * torch.ones(n_steps))
+        self.step_size_phase = nn.Parameter(0.01 * torch.ones(n_steps))
+        self.mf_coeffs = kernel.repeat(self.seq_len, 1).unsqueeze(1).conj().to(device=device)
         self.padding = int(kernel.shape[-1] / 2)
 
     def forward(self, x: Tensor):
         # Init Weights
-        w_mag = torch.ones(self.seq_len, self.n_steps)
-        w_phase = torch.rand.rand((self.seq_len, self.n_steps))
+        w_mag = torch.ones(self.seq_len, device=device)
+        w_phase = torch.rand(self.seq_len, device=device)
+
+        w_mag_all = torch.ones(self.seq_len, self.n_steps)
+        w_phase_all = torch.ones(self.seq_len, self.n_steps)
         # Matched Filter
         x = x.to(torch.complex64)
         x = F.conv1d(x, self.mf_coeffs, padding=self.padding, groups=self.seq_len)
 
         for i in range(self.n_steps + 1):
             # Force phase from -pi to pi
-            phase = torch.atan(w_phase[:, i])
+            phase = torch.atan(w_phase)
+            w_phase_all[:, i] = phase
             # Force sum of magnitudes to be seq_len
-            norm_mag = self.seq_len * torch.softmax(w_mag[:, i], dim=0)
+            norm_mag = self.seq_len * torch.softmax(w_mag, dim=0)
+            w_mag_all[:, i] = norm_mag
             # Fix IQ
-            iq_fixed = norm_mag * x * torch.exp(-1j * phase)
+            iq_fixed = norm_mag.unsqueeze(-1) * x * torch.exp(-1j * phase.unsqueeze(-1))
             # Produce RD-MAP from IQ (FFT along doppler dimention)
-            rd_map_fixed = torch.fft.fftshift(torch.fft.fft(iq_fixed, dim=0), dim=0)
+            rd_map_fixed = torch.fft.fftshift(torch.fft.fft(iq_fixed, dim=-2), dim=-2)
             # Calculate loss
             loss = snr(rd_map_fixed)
-            
+
             if i < self.n_steps:
                 # Calculate Gradients w.r.t w_mag and w_phase
-                grad_w_mag, grad_w_phase = torch.autograd.grad(loss, (w_mag, w_phase), create_graph=True)
+                grad_w_mag, grad_w_phase = torch.autograd.grad(
+                    loss, (w_mag, w_phase), create_graph=True
+                )
                 # Apply the gradient decent step (maximize)
-                w_mag = w_mag + self.step_size[i] * grad_w_mag
-                w_phase = w_phase + self.step_size[i] * grad_w_phase
-            
-        return x
+                w_mag = w_mag + self.step_size_mag[i] * grad_w_mag
+                w_phase = w_phase + self.step_size_phase[i] * grad_w_phase
+
+        return loss
+
+
+# %% Train NN
+nn_params = NeuralNetworkParams(
+    n_epochs=100,
+    batch_size=100,
+    train_size=0.9,
+    shuffle=True,
+    lambda1=0,
+    direction=-1,  # maximize
+)
+
+nn_model = DeepUnfolding(
+    n_steps=10,
+    seq_len=train_dataset.radar.n_pulses,
+    kernel=train_dataset.kernel,
+).to(device=device)
+
+optimizer = optim.Adam(lr=1e-4, params=nn_model.parameters())
+
+
+def criterion(x: Tensor) -> Tensor:
+    return x
+
+
+model = BasicNeuralNetwork(
+    nn_model=nn_model,
+    criterion=criterion,
+    optimizer=optimizer,
+    dataset=train_dataset,
+    params=nn_params,
+    # scheduler=scheduler,
+)
+# %%
+model.fit()
+# %%
