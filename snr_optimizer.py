@@ -72,8 +72,8 @@ def circular_weigthed_mean(x: Tensor) -> Tensor:
     # vals, idxs = diff.sort()
     # alpha = vals[0] / (vals[0] + vals[1])
     # peak_idx = alpha * idxs[1] + (1 - alpha) * idxs[0]
-    peak_idx = (avg.angle() + torch.pi) / (2 * torch.pi)
-    peak_idx = peak_idx * n
+    peak_idx = n * avg.angle() / (2 * torch.pi)
+    peak_idx = peak_idx + n // 2
     mag = avg.abs() ** 2
     return mag, peak_idx
 
@@ -91,17 +91,22 @@ def snr(rd_map: Tensor) -> Tuple[Tensor, float]:
     max_doppler_index = max_global_index // rd_map_energy.shape[1]
     max_range_index = max_global_index - max_doppler_index * rd_map_energy.shape[1]
     mag, peak_idx = circular_weigthed_mean(rd_map_energy[:, max_range_index])
-    peak = rd_map_energy[torch.floor(peak_idx).to(torch.int), max_range_index]
-    global_noise = (rd_map_energy.sum() - peak.sum()) / (rd_map_energy.numel() - 1)
-    doppler_noise = rd_map_energy[:, max_range_index].sum() - peak.sum()
+    idx = torch.round(peak_idx).to(torch.int) % nfft
+    # idx2 = (idx1 + 1) % nfft
+    peak = rd_map_energy[idx, max_range_index]
+    # peak2 = rd_map_energy[idx2, max_range_index]
+    # alpha = peak1 / (peak1 + peak2)
+    # peak = peak1 * alpha + peak2 * (1-alpha)
+    global_noise = (rd_map_energy.sum() - peak) / (rd_map_energy.numel() - 1)
+    doppler_noise = rd_map_energy[:, max_range_index].sum() - peak
     avg_noise = doppler_noise
-    return -10 * torch.log10(peak.sum()) + 10 * torch.log10(avg_noise), peak_idx
-    # return -10 * torch.log10(mag), peak_idx
+    return -10 * torch.log10(peak) + 10 * torch.log10(avg_noise), peak_idx
+    # return -mag, peak_idx
 
 
 # %%
 dataset = IqDiscDataset(
-    n_samples=100,
+    n_samples=1000,
     r_min=2000,
     r_max=20000,
     v_min=0,
@@ -112,7 +117,7 @@ dataset = IqDiscDataset(
 )
 # %%
 n_iter = 1000
-index = 7
+index = 2
 
 model = OptimizeSNR(seq_len=dataset.radar.n_pulses, kernel=dataset.kernel).to(
     device=device
@@ -312,12 +317,12 @@ df_diff_opt[df_diff_opt > 10] -= 20
 
 plt.hist(
     df_diff_classic,
-    bins=25,
+    bins=50,
     alpha=0.75,
     label=f"Classic - STD = {df_diff_classic.std(): .2f}",
 )
 plt.hist(
-    df_diff_opt, bins=25, alpha=0.75, label=f"Opt - STD = {df_diff_opt.std(): .2f}"
+    df_diff_opt, bins=50, alpha=0.75, label=f"Opt - STD = {df_diff_opt.std(): .2f}"
 )
 plt.legend()
 plt.title("Doppler Errors Distribution")
