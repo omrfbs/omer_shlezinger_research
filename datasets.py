@@ -105,7 +105,7 @@ class IqDiscDataset(Dataset):
 
     def produce_iq(self) -> None:
         iq = [None] * self.n_samples
-        for i in tqdm(range(self.n_samples), desc="Producing IQ"):
+        for i in tqdm(range(self.n_samples), desc="Generating IQ"):
             iq[i] = self[i][0].unsqueeze(dim=0).to(torch.complex64)
 
         self.iq = torch.concat(iq, dim=0).to(device=device)
