@@ -117,7 +117,7 @@ dataset = IqDiscDataset(
 )
 # %%
 n_iter = 1000
-index = 2
+index = 3
 
 model = OptimizeSNR(seq_len=dataset.radar.n_pulses, kernel=dataset.kernel).to(
     device=device
