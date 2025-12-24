@@ -47,7 +47,7 @@ def snr(rd_map: Tensor) -> Tensor:
     idx = torch.round(peak_idx).to(torch.int) % nfft
     peak = rd_map_energy[torch.arange(rd_map.shape[0], device=device), idx, max_range_index]
     doppler_noise = (rd_map_energy[torch.arange(rd_map.shape[0], device=device), :, max_range_index].sum(dim=-1) - peak)/(nfft-1)
-    return (10 * torch.log10(peak) - 10 * torch.log10(doppler_noise)).mean()
+    return 10 * torch.log10(peak) - 10 * torch.log10(doppler_noise)
 
 
 # %%
@@ -76,8 +76,8 @@ class DeepUnfolding(nn.Module):
         super().__init__(*args, **kwargs)
         self.seq_len = seq_len
         self.n_steps = n_steps
-        self.log_step_size_mag = nn.Parameter(-4 * torch.ones(n_steps))
-        self.log_step_size_phase = nn.Parameter(-4 * torch.ones(n_steps))
+        self.log_step_size_mag = nn.Parameter(-2 * torch.ones(seq_len, n_steps))
+        self.log_step_size_phase = nn.Parameter(-2 * torch.ones(seq_len, n_steps))
         self.mf_coeffs = kernel.repeat(self.seq_len, 1).unsqueeze(1).conj().to(device=device)
         self.padding = int(kernel.shape[-1] / 2)
         self.iq_fixed: Tensor = None
@@ -102,7 +102,7 @@ class DeepUnfolding(nn.Module):
     def forward(self, x: Tensor):
         batch_size = x.shape[0]
         # Init Weights
-        w_mag = torch.ones(batch_size, self.seq_len, device=device)
+        w_mag = torch.rand(batch_size, self.seq_len, device=device)
         w_phase = torch.rand(batch_size, self.seq_len, device=device)
 
         # Matched Filter
@@ -119,24 +119,24 @@ class DeepUnfolding(nn.Module):
                 loss = snr(rd_map_fixed)
                 # Calculate Gradients w.r.t w_mag and w_phase
                 grad_w_mag, grad_w_phase = torch.autograd.grad(
-                    loss, (w_mag_temp, w_phase_temp), create_graph=True
+                    loss, (w_mag_temp, w_phase_temp), create_graph=True, grad_outputs=torch.ones_like(loss)
                 )
                 # Apply the gradient decent step (maximize)
-                lr_mag = torch.exp(self.log_step_size_mag[i] * math.log(10))
-                lr_phase = torch.exp(self.log_step_size_phase[i] * math.log(10))
-                # w_mag = w_mag + lr_mag * grad_w_mag
+                lr_mag = torch.exp(self.log_step_size_mag[:, i] * math.log(10))
+                lr_phase = torch.exp(self.log_step_size_phase[:, i] * math.log(10))
+                w_mag = w_mag + lr_mag * grad_w_mag
                 w_phase = w_phase + lr_phase * grad_w_phase
 
         rd_map_fixed = self.produce_fixed_rd_map(x, w_mag, w_phase)
         loss = snr(rd_map_fixed)
-        return loss
+        return loss.mean()
 
 
 # %% Train NN
 nn_params = NeuralNetworkParams(
-    n_epochs=6,
-    batch_size=10,
-    train_size=0.9,
+    n_epochs=200,
+    batch_size=100,
+    train_size=0.7,
     shuffle=True,
     lambda1=0,
     direction=-1,  # maximize
@@ -178,12 +178,11 @@ test_dataset = IqDiscDataset(
     # use_custom_rcs=True,
 )
 
-idx = 10
-iq, (range_index, doppler_index) = train_dataset[idx]
-loss = model.predict(iq.unsqueeze(0))
-iq_fixed = model.nn_model.iq_fixed
-best_rd_map = torch.fft.fftshift(torch.fft.fft(iq_fixed, dim=0), dim=0)
-
+idx = 99
+iq, (range_index, doppler_index) = test_dataset[idx]
+loss = model.nn_model(iq.unsqueeze(0))
+iq_fixed = model.nn_model.iq_fixed.squeeze()
+best_rd_map = torch.fft.fftshift(torch.fft.fft(iq_fixed, dim=-2), dim=-2)
 best_rd_map = (best_rd_map.abs() ** 2).squeeze()
 plt.pcolormesh(10*torch.log10(best_rd_map.cpu().detach()))
 # %%
