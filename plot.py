@@ -3,13 +3,15 @@ import torch
 
 import matplotlib.pyplot as plt
 
-def save_rd_map(rd_map: Tensor, file_path: str = 'figs/rd_map.png') -> None:
+
+def save_rd_map(rd_map: Tensor, file_path: str = "figs/rd_map.png") -> None:
     fig, ax = plt.subplots()
     rd_map_db = 20 * torch.log10(rd_map.abs())
     ax.pcolormesh(rd_map_db.detach().cpu())
     fig.savefig(file_path)
 
-def save_spectrum(rd_map: Tensor, file_path: str = 'figs/spectrum.png') -> None:
+
+def save_spectrum(rd_map: Tensor, file_path: str = "figs/spectrum.png") -> None:
     fig, ax = plt.subplots()
     rd_map_abs = rd_map.abs()
     max_global_index = rd_map_abs.argmax()
